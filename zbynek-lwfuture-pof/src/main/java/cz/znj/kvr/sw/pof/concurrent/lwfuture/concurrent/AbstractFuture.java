@@ -5,7 +5,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Function;
 
@@ -24,7 +26,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 
 	public                          AbstractFuture(int initialStatus)
 	{
-		this.status = initialStatus;
+		setStatusLazy(initialStatus);
 	}
 
 	@Override
@@ -44,13 +46,13 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	@Override
 	public boolean			isCancelled()
 	{
-		return (status&ST_CANCELLED) != 0;
+		return (getStatusLazy()&ST_CANCELLED) != 0;
 	}
 
 	@Override
 	public boolean			isDone()
 	{
-		return status >= ST_FINISHED;
+		return getStatusLazy() >= ST_FINISHED;
 	}
 
 	@Override
@@ -68,15 +70,15 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	@Override
 	public V			get(long l, TimeUnit timeUnit) throws InterruptedException, ExecutionException, TimeoutException
 	{
-		int localStatus = status;
+		int localStatus = getStatus();
 		if (localStatus < ST_FINISHED) {
 			// this would hardly ever happen as we expect any get would be run by listener
 			synchronized (this) {
 				for (;;) {
-					localStatus = status;
+					localStatus = getStatus();
 					if (localStatus >= ST_FINISHED)
 						break;
-					if (statusUpdater.compareAndSet(this, localStatus, localStatus|ST_WAITING)) {
+					if (casStatus(localStatus, localStatus|ST_WAITING)) {
 						this.wait(timeUnit.toMillis(l));
 						if (localStatus < ST_FINISHED)
 							throw new TimeoutException();
@@ -103,9 +105,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	{
 		int localStatus = 0;
 		for (;;) {
-			if (statusUpdater.compareAndSet(this, localStatus, localStatus|ST_DELAYED_CANCEL))
+			if (casStatus(localStatus, localStatus|ST_DELAYED_CANCEL))
 				return;
-			localStatus = status;
+			localStatus = getStatusLazy();
 			if ((localStatus&ST_CANCELLED) != 0)
 				throw new IllegalStateException("Future delayed cannot be changed once the future was cancelled.");
 		}
@@ -199,9 +201,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	{
 		int localStatus = 0;
 		for (;;) {
-			if (statusUpdater.compareAndSet(this, localStatus, localStatus|ST_RUNNING))
+			if (casStatus(localStatus, localStatus|ST_RUNNING))
 				return true;
-			localStatus = status;
+			localStatus = getStatusLazy();
 			if (localStatus >= ST_FINISHED)
 				return false;
 		}
@@ -220,7 +222,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 		int localStatus = ST_RUNNING;
 		for (;;) {
 			int newStatus = localStatus&~(ST_RUNNING|ST_WAITING)|finalStatus;
-			if (statusUpdater.compareAndSet(this, localStatus, newStatus))
+			if (casStatus(localStatus, newStatus))
 				break;
 			localStatus = newStatus;
 			if (localStatus >= ST_FINISHED)
@@ -236,10 +238,10 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 
 	protected final void            addListenerNode(ListenerNode listenerNode)
 	{
-		if (listenersUpdater.compareAndSet(this, null, listenerNode))
+		if (casListeners(null, listenerNode))
 			return;
 		for (;;) {
-			ListenerNode localListeners = listeners;
+			ListenerNode localListeners = getListenersLazy();
 			if (localListeners != null) {
 				switch (localListeners.getNodeType()) {
 				case ListenerNode.NT_REGULAR:
@@ -255,14 +257,14 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					return;
 				}
 			}
-			if (listenersUpdater.compareAndSet(this, localListeners, listenerNode))
+			if (casListeners(localListeners, listenerNode))
 				return;
 		}
 	}
 
 	private final void              executeLateListener(ListenerNode<V> listener)
 	{
-		switch (status&(ST_FINISHED|ST_CANCELLED)) {
+		switch (getStatusLazy()&(ST_FINISHED|ST_CANCELLED)) {
 		case ST_FINISHED:
 			if (excepted != null)
 				listener.executeExcepted();
@@ -276,26 +278,27 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 			break;
 
 		default:
-			throw new IllegalStateException("Unexpected status when running late listener: "+status);
+			throw new IllegalStateException("Unexpected status when running late listener: "+getStatusLazy());
 		}
 	}
 
 	private final ListenerNode<V>   swapListenersQueue(ListenerNode<V> last)
 	{
-		ListenerNode<V> tail = last;
+		if (last == null || last.getNextNode() == null)
+			return last;
 		ListenerNode<V> next = last.getNextNode();
-		tail.nextNode = null;
+		last.nextNode = null;
 		for (ListenerNode<V> current = next; current != null; current = next) {
 			next = current.getNextNode();
-			current.nextNode = tail;
-			tail = current;
+			current.nextNode = last;
+			last = current;
 		}
-		return tail;
+		return last;
 	}
 
 	private final void              processListenersSet()
 	{
-		ListenerNode lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
 		for (;;) {
 			if (lastListener != null) {
 				for (lastListener = swapListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
@@ -307,15 +310,15 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					}
 				}
 			}
-			if (listenersUpdater.compareAndSet(this, MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
 				return;
-			lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+			lastListener = xchgListeners(MARKER_PROCESSING);
 		}
 	}
 
 	private final void              processListenersExcepted()
 	{
-		ListenerNode lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
 		for (;;) {
 			if (lastListener != null) {
 				for (lastListener = swapListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
@@ -327,15 +330,15 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					}
 				}
 			}
-			if (listenersUpdater.compareAndSet(this, MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
 				return;
-			lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+			lastListener = xchgListeners(MARKER_PROCESSING);
 		}
 	}
 
 	private final void              processListenersCancelled()
 	{
-		ListenerNode lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
 		for (;;) {
 			if (lastListener != null) {
 				for (lastListener = swapListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
@@ -347,10 +350,65 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					}
 				}
 			}
-			if (listenersUpdater.compareAndSet(this, MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
 				return;
-			lastListener = listenersUpdater.getAndSet(this, MARKER_PROCESSING);
+			lastListener = xchgListeners(MARKER_PROCESSING);
 		}
+	}
+
+	private final int               getStatus()
+	{
+		return this.status.get();
+	}
+
+	private final int               getStatusLazy()
+	{
+		return this.status.get();
+	}
+
+	private final void              setStatus(int status)
+	{
+		this.status.set(status);
+	}
+
+	private final void              setStatusLazy(int status)
+	{
+		this.status.lazySet(status);
+	}
+
+	private final boolean           casStatus(int expected, int set)
+	{
+		return this.status.compareAndSet(expected, set);
+	}
+
+	private final ListenerNode<V>   getListeners()
+	{
+		return this.listeners.get();
+	}
+
+	private final ListenerNode<V>   getListenersLazy()
+	{
+		return this.listeners.get();
+	}
+
+	private final void              setListeners(ListenerNode<V> listeners)
+	{
+		this.listeners.set(listeners);
+	}
+
+	private final void              setListenersLazy(ListenerNode<V> listeners)
+	{
+		this.listeners.lazySet(listeners);
+	}
+
+	private final boolean           casListeners(ListenerNode<V> expected, ListenerNode<V> set)
+	{
+		return this.listeners.compareAndSet(expected, set);
+	}
+
+	private final ListenerNode<V>   xchgListeners(ListenerNode<V> set)
+	{
+		return this.listeners.getAndSet(set);
 	}
 
 	protected static abstract class ListenerNode<V>
@@ -423,9 +481,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 
 	private Throwable               excepted = null;
 
-	private volatile int		status;
+	private AtomicInteger           status = new AtomicInteger();
 
-	private volatile ListenerNode   listeners = null;
+	private AtomicReference<ListenerNode<V>> listeners = new AtomicReference<>();
 
 	protected static final int      ST_DELAYED_CANCEL               = 1;
 	protected static final int	ST_RUNNING                      = 2;
@@ -435,7 +493,4 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 
 	protected static final ListenerNode MARKER_PROCESSING = new MarkerListenerNode(ListenerNode.NT_MARKER_PROCESSING);
 	protected static final ListenerNode MARKER_FINISHED = new MarkerListenerNode(ListenerNode.NT_MARKER_FINISHED);
-
-	protected static final AtomicIntegerFieldUpdater<AbstractFuture> statusUpdater = AtomicIntegerFieldUpdater.newUpdater(AbstractFuture.class, "status");
-	protected static final AtomicReferenceFieldUpdater<AbstractFuture, ListenerNode> listenersUpdater = AtomicReferenceFieldUpdater.newUpdater(AbstractFuture.class, ListenerNode.class, "listeners");
 }
