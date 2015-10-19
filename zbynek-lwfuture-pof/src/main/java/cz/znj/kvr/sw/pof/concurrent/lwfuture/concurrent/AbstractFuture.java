@@ -653,12 +653,12 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	/**
 	 * Status of this future, may be ORs of ST_* constants.
 	 */
-	private AtomicInteger           status = new AtomicInteger();
+	private final AtomicInteger     status = new AtomicInteger();
 
 	/**
 	 * Listeners queue.
 	 */
-	private AtomicReference<ListenerNode<V>> listeners = new AtomicReference<>();
+	private final AtomicReference<ListenerNode<V>> listeners = new AtomicReference<>();
 
 	/** Delayed cancel notifications flag */
 	private static final int        ST_DELAYED_CANCEL               = 1;
