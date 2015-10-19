@@ -10,6 +10,8 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 
 /**
@@ -139,6 +141,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	{
 		addListenerNode(new RegularListenerNode() {
 			@Override
+			public String toString() { return listener.toString(); }
+
+			@Override
 			public void executeSet() {
 				listener.run();
 			}
@@ -161,6 +166,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	{
 		addListenerNode(new RegularListenerNode() {
 			@Override
+			public String toString() { return listener.toString(); }
+
+			@Override
 			public void executeSet() {
 				listener.apply(AbstractFuture.this);
 			}
@@ -182,6 +190,9 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	public ListenableFuture<V>      addListener(final FutureListener<V> listener)
 	{
 		addListenerNode(new RegularListenerNode() {
+			@Override
+			public String toString() { return listener.toString(); }
+
 			@Override
 			public void executeSet() {
 				listener.onSuccess(result);
@@ -332,21 +343,11 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 			return;
 		for (;;) {
 			ListenerNode localListeners = getListenersLazy();
-			if (localListeners != null) {
-				switch (localListeners.getNodeType()) {
-				case ListenerNode.NT_REGULAR:
-					listenerNode.nextNode = localListeners;
-					break;
-
-				case ListenerNode.NT_MARKER_PROCESSING:
-					// leave the next set to null
-					break;
-
-				case ListenerNode.NT_MARKER_FINISHED:
-					executeLateListener(listenerNode);
-					return;
-				}
+			if (localListeners != null && localListeners.getNodeType() != ListenerNode.NT_REGULAR) {
+				executeLateListener(listenerNode);
+				return;
 			}
+			listenerNode.nextNode = localListeners;
 			if (casListeners(localListeners, listenerNode))
 				return;
 		}
@@ -383,19 +384,20 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	 */
 	private final void              processListenersSet()
 	{
-		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
+		ListenerNode boundaryListener = null;
 		for (;;) {
-			for (lastListener = ListenerNode.reverseListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
+			ListenerNode lastListener = getListeners();
+			for (ListenerNode current = ListenerNode.reverseListenersQueue(lastListener, boundaryListener); current != boundaryListener; current = current.nextNode) {
 				try {
-					lastListener.executeSet();
+					current.executeSet();
 				}
 				catch (Exception ex) {
 					// ignore exceptions from listeners
 				}
 			}
-			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(lastListener, LN_MARKER_CLOSED))
 				return;
-			lastListener = xchgListeners(MARKER_PROCESSING);
+			boundaryListener = lastListener;
 		}
 	}
 
@@ -404,19 +406,20 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	 */
 	private final void              processListenersExcepted()
 	{
-		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
+		ListenerNode boundaryListener = null;
 		for (;;) {
-			for (lastListener = ListenerNode.reverseListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
+			ListenerNode lastListener = getListeners();
+			for (ListenerNode current = ListenerNode.reverseListenersQueue(lastListener, boundaryListener); current != boundaryListener; current = current.nextNode) {
 				try {
-					lastListener.executeExcepted();
+					current.executeExcepted();
 				}
 				catch (Exception ex) {
 					// ignore exceptions from listeners
 				}
 			}
-			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(lastListener, LN_MARKER_CLOSED))
 				return;
-			lastListener = xchgListeners(MARKER_PROCESSING);
+			boundaryListener = lastListener;
 		}
 	}
 
@@ -425,19 +428,20 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	 */
 	private final void              processListenersCancelled()
 	{
-		ListenerNode lastListener = xchgListeners(MARKER_PROCESSING);
+		ListenerNode boundaryListener = null;
 		for (;;) {
-			for (lastListener = ListenerNode.reverseListenersQueue(lastListener); lastListener != null; lastListener = lastListener.nextNode) {
+			ListenerNode lastListener = getListeners();
+			for (ListenerNode current = ListenerNode.reverseListenersQueue(lastListener, boundaryListener); current != boundaryListener; current = current.nextNode) {
 				try {
-					lastListener.executeCancelled();
+					current.executeCancelled();
 				}
-				catch (Exception ex) {
-					// ignore exceptions from listeners
+				catch (RuntimeException ex) {
+					logger.log(Level.SEVERE, "RuntimeException raised by FutureListener "+current, ex);
 				}
 			}
-			if (casListeners(MARKER_PROCESSING, MARKER_FINISHED))
+			if (casListeners(lastListener, LN_MARKER_CLOSED))
 				return;
-			lastListener = xchgListeners(MARKER_PROCESSING);
+			boundaryListener = lastListener;
 		}
 	}
 
@@ -503,10 +507,8 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	{
 		/** Regular listener */
 		public static final int         NT_REGULAR                      = 0;
-		/** Currently processing queue */
-		public static final int         NT_MARKER_PROCESSING            = 1;
 		/** Queue processing finished and closed */
-		public static final int         NT_MARKER_FINISHED              = 2;
+		public static final int         NT_MARKER_CLOSED                = 1;
 
 		/**
 		 * Constructs new instance with specified node type.
@@ -528,13 +530,17 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 		 * @return
 		 *      reversed list
 		 */
-		public static <V> ListenerNode<V> reverseListenersQueue(ListenerNode last)
+		public static <V> ListenerNode<V> reverseListenersQueue(ListenerNode last, ListenerNode boundary)
 		{
-			if (last == null || last.getNextNode() == null)
+			if (last == null) {
 				return last;
+			}
+			else if (last.getNextNode() == boundary) {
+				return last;
+			}
 			ListenerNode next = last.getNextNode();
-			last.nextNode = null;
-			for (ListenerNode current = next; current != null; current = next) {
+			last.nextNode = boundary;
+			for (ListenerNode current = next; current != boundary; current = next) {
 				next = current.getNextNode();
 				current.nextNode = last;
 				last = current;
@@ -665,8 +671,8 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	/** Cancelled requested */
 	private static final int        ST_CANCELLED                    = 16;
 
-	/** Marks currently processed listener queue */
-	private static final ListenerNode MARKER_PROCESSING = new MarkerListenerNode(ListenerNode.NT_MARKER_PROCESSING);
 	/** Marks closed listener queue */
-	private static final ListenerNode MARKER_FINISHED = new MarkerListenerNode(ListenerNode.NT_MARKER_FINISHED);
+	private static final ListenerNode LN_MARKER_CLOSED = new MarkerListenerNode(ListenerNode.NT_MARKER_CLOSED);
+
+	private static final Logger     logger = Logger.getLogger(AbstractFuture.class.getName());
 }
