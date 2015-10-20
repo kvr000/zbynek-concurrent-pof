@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -182,7 +181,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	}
 
 	@Override
-	public ListenableFuture<V>	addListener(final Function<Future<V>, Void> listener)
+	public <FT extends Future<V>> ListenableFuture<V> addListener(final FutureNotifier<FT> listener)
 	{
 		addListenerNode(new RegularListenerNode() {
 			@Override
@@ -191,18 +190,21 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 			}
 
 			@Override
+			@SuppressWarnings("unchecked")
 			public void executeSet() {
-				listener.apply(AbstractFuture.this);
+				listener.notify((FT)AbstractFuture.this);
 			}
 
 			@Override
+			@SuppressWarnings("unchecked")
 			public void executeExcepted() {
-				listener.apply(AbstractFuture.this);
+				listener.notify((FT)AbstractFuture.this);
 			}
 
 			@Override
+			@SuppressWarnings("unchecked")
 			public void executeCancelled() {
-				listener.apply(AbstractFuture.this);
+				listener.notify((FT)AbstractFuture.this);
 			}
 		});
 		return this;
