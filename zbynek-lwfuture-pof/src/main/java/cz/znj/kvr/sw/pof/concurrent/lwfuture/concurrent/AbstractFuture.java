@@ -16,6 +16,9 @@
 
 package cz.znj.kvr.sw.pof.concurrent.lwfuture.concurrent;
 
+import sun.misc.Unsafe;
+
+import java.lang.reflect.Field;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -543,58 +546,60 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 
 	private final int               getStatus()
 	{
-		return this.status;
+		return unsafe.getIntVolatile(this, statusOffset);
 	}
 
 	private final int               getStatusLazy()
 	{
-		return this.status;
+		return unsafe.getInt(this, statusOffset);
 	}
 
 	private final void              setStatus(int status)
 	{
-		this.status = status;
+		unsafe.putIntVolatile(this, statusOffset, status);
 	}
 
 	private final void              setStatusLazy(int status)
 	{
-		this.status = status;
+		unsafe.putInt(this, statusOffset, status);
 	}
 
 	private final boolean           casStatus(int expected, int set)
 	{
-		return statusUpdater.compareAndSet(this, expected, set);
+		return unsafe.compareAndSwapInt(this, statusOffset, expected, set);
 	}
 
+	@SuppressWarnings("unchecked")
 	private final ListenerNode<V>   getListeners()
 	{
-		return this.listeners;
+		return (ListenerNode<V>) unsafe.getObjectVolatile(this, listenersOffset);
 	}
 
+	@SuppressWarnings("unchecked")
 	private final ListenerNode<V>   getListenersLazy()
 	{
-		return this.listeners;
+		return (ListenerNode<V>) unsafe.getObject(this, listenersOffset);
 	}
 
 	private final void              setListeners(ListenerNode<V> listeners)
 	{
-		this.listeners = listeners;
+		unsafe.putObjectVolatile(this, listenersOffset, listeners);
 	}
 
 	private final void              setListenersLazy(ListenerNode<V> listeners)
 	{
-		this.listeners = listeners;
+		unsafe.putObject(this, listenersOffset, listeners);
 	}
 
 	private final boolean           casListeners(ListenerNode<V> expected, ListenerNode<V> set)
 	{
-		return listenersUpdater.compareAndSet(this, expected, set);
+		return unsafe.compareAndSwapObject(this, listenersOffset, expected, set);
 	}
 
 	@SuppressWarnings("unchecked")
 	private final ListenerNode<V>   xchgListeners(ListenerNode<V> set)
 	{
-		return listenersUpdater.getAndSet(this, set);
+		return (ListenerNode<V>) unsafe.getAndSetObject(this, listenersOffset, set);
 	}
 
 	/**
@@ -770,6 +775,31 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 		}
 	}
 
+	private static final Unsafe     getTheUnsafe()
+	{
+		try {
+			Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+			unsafeField.setAccessible(true);
+			return (Unsafe) unsafeField.get(null);
+		}
+		catch (NoSuchFieldException e) {
+			throw new RuntimeException(e);
+		}
+		catch (IllegalAccessException e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	private static final Field      getMyField(String name)
+	{
+		try {
+			return AbstractFuture.class.getDeclaredField(name);
+		}
+		catch (NoSuchFieldException e) {
+			throw new RuntimeException(e);
+		}
+	}
+
 	/**
 	 * Result of this future. Does not need to be volatile as reads/writes are surrounded by other memory barriers.
 	 */
@@ -783,12 +813,12 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	/**
 	 * Status of this future, may be ORs of ST_* constants.
 	 */
-	private volatile int		status;
+	private int		        status;
 
 	/**
 	 * Listeners queue.
 	 */
-	private volatile ListenerNode<V> listeners = null;
+	private ListenerNode<V>         listeners = null;
 
 	/** Delayed cancel notifications flag */
 	private static final int        ST_DELAYED_CANCEL               = 1;
@@ -804,8 +834,11 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	/** Marks closed listener queue */
 	private static final ListenerNode LN_MARKER_CLOSED = new MarkerListenerNode(ListenerNode.NT_MARKER_CLOSED);
 
-	private static final AtomicIntegerFieldUpdater<AbstractFuture> statusUpdater = AtomicIntegerFieldUpdater.newUpdater(AbstractFuture.class, "status");
-	private static final AtomicReferenceFieldUpdater<AbstractFuture, ListenerNode> listenersUpdater = AtomicReferenceFieldUpdater.newUpdater(AbstractFuture.class, ListenerNode.class, "listeners");
+	private static final Unsafe     unsafe = getTheUnsafe();
+
+	private static final long       statusOffset = unsafe.objectFieldOffset(getMyField("status"));
+
+	private static final long       listenersOffset = unsafe.objectFieldOffset(getMyField("listeners"));
 
 	private static final Logger     logger = Logger.getLogger(AbstractFuture.class.getName());
 }
