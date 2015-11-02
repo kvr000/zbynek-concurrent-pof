@@ -1098,7 +1098,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	/**
 	 * Listeners queue.
 	 */
-	private final AtomicReference<ListenerNode<V>> listeners = new AtomicReference<>();
+	private final AtomicReference<ListenerNode<V>> listeners = new AtomicReference<ListenerNode<V>>();
 
 	/** Delayed cancel notifications flag */
 	private static final int        ST_DELAYED_CANCEL               = 1;
