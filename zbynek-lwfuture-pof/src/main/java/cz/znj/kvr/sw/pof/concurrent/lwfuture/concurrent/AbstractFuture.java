@@ -799,7 +799,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	 * @param listener
 	 *      listener to be executed
 	 */
-	private final void              executeLateListener(ListenerNode listener)
+	private final void              executeLateListener(ListenerNode<V> listener)
 	{
 		switch (getStatusLazy()&(ST_FINISHED|ST_CANCELLED)) {
 		case ST_FINISHED:
@@ -854,7 +854,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					logger.log(Level.SEVERE, "RuntimeException raised by FutureListener.onSuccess() "+current.toStringSet(), ex);
 				}
 			}
-			if (casListeners(lastListener, LN_MARKER_CLOSED))
+			if (casListeners(lastListener, (ListenerNode<V>)LN_MARKER_CLOSED))
 				return;
 			boundaryListener = lastListener;
 		}
@@ -877,7 +877,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					logger.log(Level.SEVERE, "RuntimeException raised by FutureListener.onExcepted() "+current.toStringExcepted(), ex);
 				}
 			}
-			if (casListeners(lastListener, LN_MARKER_CLOSED))
+			if (casListeners(lastListener, (ListenerNode<V>)LN_MARKER_CLOSED))
 				return;
 			boundaryListener = lastListener;
 		}
@@ -900,7 +900,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 					logger.log(Level.SEVERE, "RuntimeException raised by FutureListener.onCancelled() "+current.toStringCancelled(), ex);
 				}
 			}
-			if (casListeners(lastListener, LN_MARKER_CLOSED))
+			if (casListeners(lastListener, (ListenerNode<V>)LN_MARKER_CLOSED))
 				return;
 			boundaryListener = lastListener;
 		}
@@ -1173,7 +1173,7 @@ public class AbstractFuture<V> implements ListenableFuture<V>
 	private static final int        ST_CANCELLED                    = 128;
 
 	/** Marks closed listener queue */
-	private static final ListenerNode LN_MARKER_CLOSED = new MarkerListenerNode(ListenerNode.NT_MARKER_CLOSED);
+	private static final ListenerNode<?> LN_MARKER_CLOSED = new MarkerListenerNode<Object>(ListenerNode.NT_MARKER_CLOSED);
 
 	private static final Logger     logger = Logger.getLogger(AbstractFuture.class.getName());
 }
